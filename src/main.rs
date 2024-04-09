@@ -44,7 +44,7 @@ impl FrameCollection {
         FrameCollection { frames }
     }
 
-    fn get_today_frames(&self) -> Self {
+    fn get_past_twenty_four_frames(&self) -> Self {
         let now = Utc::now();
         let one_day_ago = now - chrono::Duration::days(1);
 
@@ -52,6 +52,38 @@ impl FrameCollection {
             .frames
             .iter()
             .filter(|frame| frame.timestamp > one_day_ago.timestamp() as u64)
+            .map(|frame| frame.clone())
+            .collect();
+
+        frames.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        FrameCollection { frames }
+    }
+    
+    fn get_past_forty_eight_frames(&self) -> Self {
+        let now = Utc::now();
+        let two_days_ago = now - chrono::Duration::days(2);
+
+        let mut frames: Vec<Frame> = self
+            .frames
+            .iter()
+            .filter(|frame| frame.timestamp > two_days_ago.timestamp() as u64)
+            .map(|frame| frame.clone())
+            .collect();
+
+        frames.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        FrameCollection { frames }
+    }
+    
+    fn get_past_week_frames(&self) -> Self {
+        let now = Utc::now();
+        let one_week_ago = now - chrono::Duration::days(7);
+
+        let mut frames: Vec<Frame> = self
+            .frames
+            .iter()
+            .filter(|frame| frame.timestamp > one_week_ago.timestamp() as u64)
             .map(|frame| frame.clone())
             .collect();
 
@@ -76,16 +108,63 @@ impl From<&FrameFolder> for String {
         }
     }
 }
+
 #[handler]
-fn day_handler(
+fn week_handler(
     path: Path<String>,
     frame_folder: Data<&FrameFolder>,
 ) -> poem::Result<poem::Response> {
     let resolved_folder = PathBuf::from(String::from(frame_folder.0)).join(path.0);
     let frame_collection = FrameCollection::new(resolved_folder);
-    let today_frames = frame_collection.get_today_frames();
+    let frames = frame_collection.get_past_week_frames();
 
-    let images = load_images(&today_frames.into_paths());
+    let images = load_images(&frames.into_paths());
+
+    // 15 seconds holy heck
+    let gif = engiffen(&images, 5, Quantizer::NeuQuant(4)).unwrap();
+
+    let mut buffer = Vec::new();
+    gif.write(&mut buffer).unwrap();
+    let mut curs = Cursor::new(buffer);
+
+    Ok(Binary(curs.get_ref().clone())
+        .with_content_type(mime::IMAGE_GIF.to_string())
+        .into_response())
+}
+
+#[handler]
+fn forty_eight_handler(
+    path: Path<String>,
+    frame_folder: Data<&FrameFolder>,
+) -> poem::Result<poem::Response> {
+    let resolved_folder = PathBuf::from(String::from(frame_folder.0)).join(path.0);
+    let frame_collection = FrameCollection::new(resolved_folder);
+    let frames = frame_collection.get_past_forty_eight_frames();
+
+    let images = load_images(&frames.into_paths());
+
+    // 15 seconds holy heck
+    let gif = engiffen(&images, 5, Quantizer::NeuQuant(4)).unwrap();
+
+    let mut buffer = Vec::new();
+    gif.write(&mut buffer).unwrap();
+    let mut curs = Cursor::new(buffer);
+
+    Ok(Binary(curs.get_ref().clone())
+        .with_content_type(mime::IMAGE_GIF.to_string())
+        .into_response())
+}
+
+#[handler]
+fn twenty_four_handler(
+    path: Path<String>,
+    frame_folder: Data<&FrameFolder>,
+) -> poem::Result<poem::Response> {
+    let resolved_folder = PathBuf::from(String::from(frame_folder.0)).join(path.0);
+    let frame_collection = FrameCollection::new(resolved_folder);
+    let frames = frame_collection.get_past_twenty_four_frames();
+
+    let images = load_images(&frames.into_paths());
 
     // 15 seconds holy heck
     let gif = engiffen(&images, 5, Quantizer::NeuQuant(4)).unwrap();
@@ -110,11 +189,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         port,
         host
     );
-    println!("http://{}:{}/timelapse/day/:folder", host, port);
-    let day_service = Route::new().at("/*path", get(day_handler));
+    println!("http://{}:{}/timelapse/24/:folder", host, port);
+    println!("http://{}:{}/timelapse/48/:folder", host, port);
+    println!("http://{}:{}/timelapse/1w/:folder", host, port);
+    let twenty_four_service = Route::new().at("/*path", get(twenty_four_handler));
+    let forty_eight_service = Route::new().at("/*path", get(forty_eight_handler));
+    let week_service = Route::new().at("/*path", get(week_handler));
 
     let route = Route::new()
-        .nest("/timelapse/day", day_service)
+        .nest("/timelapse/24", twenty_four_service)
+        .nest("/timelapse/48", forty_eight_service)
+        .nest("/timelapse/1w", week_service)
         .data(frame_folder);
     Server::new(TcpListener::bind(format!("{host}:{port}")))
         .run(route)
