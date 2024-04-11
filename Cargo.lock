@@ -1750,6 +1750,7 @@ dependencies = [
  "mime_guess",
  "poem",
  "poem-openapi",
+ "serde",
  "tokio",
  "tracing",
 ]

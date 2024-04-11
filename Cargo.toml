@@ -13,3 +13,4 @@ anyhow = "1.0.81"
 tokio = { version = "1", features = ["full"] }
 engiffen = "0.8.1"
 mime_guess = "2.0.4"
+serde = { version = "1.0", features = ["derive"] }
