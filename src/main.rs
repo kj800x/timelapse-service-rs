@@ -7,6 +7,7 @@ use poem::IntoResponse;
 use poem::{get, handler, EndpointExt, Route, Server};
 use poem_openapi::payload::Binary;
 use serde::Deserialize;
+use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
 use std::{env, fs, io::Cursor};
 
@@ -93,24 +94,21 @@ impl FrameCollection {
 }
 
 #[derive(Clone)]
-enum FrameFolder {
-    FrameFolder(String),
-}
-impl From<&FrameFolder> for String {
-    fn from(value: &FrameFolder) -> Self {
-        match value {
-            FrameFolder::FrameFolder(x) => x.clone(),
-        }
+struct FrameFolder(String);
+
+impl Display for FrameFolder {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
 #[handler]
 fn week_handler(
     Path(folder): Path<String>,
-    frame_folder: Data<&FrameFolder>,
+    Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
 ) -> poem::Result<poem::Response> {
-    let resolved_folder = PathBuf::from(String::from(frame_folder.0)).join(folder);
+    let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
     frame_collection
@@ -121,10 +119,10 @@ fn week_handler(
 #[handler]
 fn forty_eight_handler(
     Path(folder): Path<String>,
-    frame_folder: Data<&FrameFolder>,
+    Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
 ) -> poem::Result<poem::Response> {
-    let resolved_folder = PathBuf::from(String::from(frame_folder.0)).join(folder);
+    let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
     frame_collection
@@ -135,10 +133,10 @@ fn forty_eight_handler(
 #[handler]
 fn twenty_four_handler(
     Path(folder): Path<String>,
-    frame_folder: Data<&FrameFolder>,
+    Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
 ) -> poem::Result<poem::Response> {
-    let resolved_folder = PathBuf::from(String::from(frame_folder.0)).join(folder);
+    let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
     frame_collection
@@ -149,10 +147,10 @@ fn twenty_four_handler(
 #[handler]
 fn day_handler(
     Path((day, folder)): Path<(String, String)>,
-    frame_folder: Data<&FrameFolder>,
+    Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
 ) -> poem::Result<poem::Response> {
-    let resolved_folder = PathBuf::from(String::from(frame_folder.0)).join(folder);
+    let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
     // Assume the day is in the format YYYY-MM-DD and the timezone is Eastern
@@ -170,10 +168,10 @@ fn day_handler(
 #[handler]
 fn exact_handler(
     Path((start, end, folder)): Path<(String, String, String)>,
-    frame_folder: Data<&FrameFolder>,
+    Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
 ) -> poem::Result<poem::Response> {
-    let resolved_folder = PathBuf::from(String::from(frame_folder.0)).join(folder);
+    let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
     let start = DateTime::parse_from_rfc3339(&start).unwrap();
@@ -188,14 +186,11 @@ fn exact_handler(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = "0.0.0.0";
     let port: i32 = env::var("PORT").map(|x| x.parse().unwrap()).unwrap_or(8102);
-    let frame_folder = FrameFolder::FrameFolder(
-        env::var("OUTPUT_FOLDER").expect("OUTPUT_FOLDER env var required"),
-    );
+    let frame_folder =
+        FrameFolder(env::var("OUTPUT_FOLDER").expect("OUTPUT_FOLDER env var required"));
     println!(
         "OUTPUT_FOLDER: {}\nPort: {}\nHost: {}",
-        String::from(&frame_folder),
-        port,
-        host
+        frame_folder, port, host
     );
     println!("http://{}:{}/timelapse/24/:folder", host, port);
     println!("http://{}:{}/timelapse/48/:folder", host, port);
