@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
-use engiffen::{engiffen, load_images, Quantizer};
-use mime_guess::mime::{self};
+use poem::http::StatusCode;
 use poem::listener::TcpListener;
 use poem::web::{Data, Path, Query};
 use poem::IntoResponse;
@@ -8,7 +7,9 @@ use poem::{get, handler, EndpointExt, Route, Server};
 use poem_openapi::payload::Binary;
 use serde::Deserialize;
 use std::fmt::{self, Display, Formatter};
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::{env, fs, io::Cursor};
 
 #[derive(Deserialize)]
@@ -77,18 +78,49 @@ impl FrameCollection {
         self.frames.into_iter().map(|frame| frame.path).collect()
     }
 
-    fn into_gif(self, fps: usize) -> poem::Result<poem::Response> {
-        let images = load_images(&self.into_paths());
+    fn into_mp4(self, fps: usize) -> poem::Result<poem::Response> {
+        if self.frames.len() == 0 {
+            return Ok(poem::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(()));
+        }
 
-        // 15 seconds holy heck
-        let gif = engiffen(&images, fps, Quantizer::NeuQuant(4)).unwrap();
+        let mut child = Command::new("ffmpeg")
+            .arg("-safe")
+            .arg("0")
+            .arg("-protocol_whitelist")
+            .arg("pipe,file")
+            .arg("-f")
+            .arg("concat")
+            .arg("-i")
+            .arg("pipe:0")
+            .arg("-f")
+            .arg("mp4")
+            .arg("-movflags")
+            .arg("empty_moov")
+            .arg("pipe:1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("Failed to spawn child process");
 
-        let mut buffer = Vec::new();
-        gif.write(&mut buffer).unwrap();
-        let curs = Cursor::new(buffer);
+        let mut stdin = child.stdin.take().expect("Failed to open stdin");
+        let mut ffmpeg_input = String::new();
+        for path in self.into_paths() {
+            ffmpeg_input.push_str(&format!("file 'file:{}'\n", path.to_str().unwrap()));
+            ffmpeg_input.push_str(&format!("outpoint {:.2}\n", 1f32 / fps as f32));
+        }
+        std::thread::spawn(move || {
+            stdin
+                .write_all(ffmpeg_input.as_bytes())
+                .expect("Failed to write to stdin");
+        });
 
+        let output = child.wait_with_output().expect("Failed to read stdout");
+        let curs = Cursor::new(output.stdout);
         Ok(Binary(curs.get_ref().clone())
-            .with_content_type(mime::IMAGE_GIF.to_string())
+            .with_content_type("video/mp4")
             .into_response())
     }
 }
@@ -113,7 +145,7 @@ fn week_handler(
 
     frame_collection
         .get_past_days(7)
-        .into_gif(params.fps.unwrap_or(20))
+        .into_mp4(params.fps.unwrap_or(20))
 }
 
 #[handler]
@@ -127,7 +159,7 @@ fn forty_eight_handler(
 
     frame_collection
         .get_past_days(2)
-        .into_gif(params.fps.unwrap_or(20))
+        .into_mp4(params.fps.unwrap_or(20))
 }
 
 #[handler]
@@ -141,7 +173,7 @@ fn twenty_four_handler(
 
     frame_collection
         .get_past_days(1)
-        .into_gif(params.fps.unwrap_or(20))
+        .into_mp4(params.fps.unwrap_or(20))
 }
 
 #[handler]
@@ -162,7 +194,7 @@ fn day_handler(
 
     frame_collection
         .get_range(start.into(), end.into())
-        .into_gif(params.fps.unwrap_or(20))
+        .into_mp4(params.fps.unwrap_or(20))
 }
 
 #[handler]
@@ -179,7 +211,7 @@ fn exact_handler(
 
     frame_collection
         .get_range(start.into(), end.into())
-        .into_gif(params.fps.unwrap_or(20))
+        .into_mp4(params.fps.unwrap_or(20))
 }
 
 #[tokio::main]
