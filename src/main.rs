@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use poem::http::StatusCode;
+use poem::http::{HeaderMap, StatusCode};
 use poem::listener::TcpListener;
 use poem::web::{Data, Path, Query};
 use poem::IntoResponse;
@@ -7,14 +7,72 @@ use poem::{get, handler, EndpointExt, Route, Server};
 use poem_openapi::payload::Binary;
 use serde::Deserialize;
 use std::fmt::{self, Display, Formatter};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::{env, fs, io::Cursor};
+use std::{env, fs};
+use tempfile::Builder;
 
+// use poem::web::headers::{Header, HeaderName, HeaderValue};
+
+// enum SecFetchDest {
+//     Document,
+//     Video,
+// }
+
+// static SEC_FETCH_DEST: HeaderName = poem::web::headers::HeaderName::from_static("sec-fetch-dest");
+
+// impl Header for SecFetchDest {
+//     fn name() -> &'static HeaderName {
+//         &SEC_FETCH_DEST
+//     }
+
+//     fn decode<'i, I>(values: &mut I) -> Result<Self, poem::web::headers::Error>
+//     where
+//         I: Iterator<Item = &'i HeaderValue>,
+//     {
+//         let value = values
+//             .next()
+//             .ok_or_else(poem::web::headers::Error::invalid)?;
+
+//         if value == "document" {
+//             Ok(SecFetchDest::Document)
+//         } else if value == "video" {
+//             Ok(SecFetchDest::Video)
+//         } else {
+//             Err(poem::web::headers::Error::invalid())
+//         }
+//     }
+
+//     fn encode<E>(&self, values: &mut E)
+//     where
+//         E: Extend<HeaderValue>,
+//     {
+//         match self {
+//             SecFetchDest::Document => {
+//                 let value = HeaderValue::from_static("document");
+//                 values.extend(std::iter::once(value));
+//             }
+//             SecFetchDest::Video => {
+//                 let value = HeaderValue::from_static("video");
+//                 values.extend(std::iter::once(value));
+//             }
+//         }
+//     }
+// }
 #[derive(Deserialize)]
 struct QueryParams {
     fps: Option<usize>,
+}
+
+impl QueryParams {
+    fn as_str(&self) -> String {
+        let mut result = String::new();
+        if let Some(fps) = self.fps {
+            result.push_str(&format!("fps={}", fps));
+        }
+        result
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +143,14 @@ impl FrameCollection {
                 .body(()));
         }
 
+        let file = Builder::new()
+            .prefix("timelapse")
+            .suffix(".mp4")
+            .tempfile()
+            .expect("Failed to create temp file");
+
         let mut child = Command::new("ffmpeg")
+            .arg("-y")
             .arg("-safe")
             .arg("0")
             .arg("-protocol_whitelist")
@@ -97,11 +162,11 @@ impl FrameCollection {
             .arg("-f")
             .arg("mp4")
             .arg("-movflags")
-            .arg("empty_moov")
-            .arg("pipe:1")
+            .arg("+faststart")
+            .arg(file.path())
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .spawn()
             .expect("Failed to spawn child process");
 
@@ -117,9 +182,14 @@ impl FrameCollection {
                 .expect("Failed to write to stdin");
         });
 
-        let output = child.wait_with_output().expect("Failed to read stdout");
-        let curs = Cursor::new(output.stdout);
-        Ok(Binary(curs.get_ref().clone())
+        child.wait().expect("Failed to ffmpeg");
+
+        // Read file contents into buffer
+        let metadata = fs::metadata(&file.path()).expect("unable to read metadata");
+        let mut buffer = vec![0; metadata.len() as usize];
+        file.as_file().read(&mut buffer).expect("buffer overflow");
+
+        Ok(Binary(buffer)
             .with_content_type("video/mp4")
             .into_response())
     }
@@ -139,7 +209,17 @@ fn week_handler(
     Path(folder): Path<String>,
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
+    headers: &HeaderMap,
 ) -> poem::Result<poem::Response> {
+    let sec_fetch_dest = headers.get("sec-fetch-dest").unwrap();
+
+    if sec_fetch_dest == "document" {
+        return html_page(&format!("./{}?{}", folder, params.0.as_str()));
+    }
+
+    // trim the trailing ".mp4" from folder
+    let folder = folder.trim_end_matches(".mp4");
+
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
@@ -153,7 +233,17 @@ fn forty_eight_handler(
     Path(folder): Path<String>,
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
+    headers: &HeaderMap,
 ) -> poem::Result<poem::Response> {
+    let sec_fetch_dest = headers.get("sec-fetch-dest").unwrap();
+
+    if sec_fetch_dest == "document" {
+        return html_page(&format!("./{}?{}", folder, params.0.as_str()));
+    }
+
+    // trim the trailing ".mp4" from folder
+    let folder = folder.trim_end_matches(".mp4");
+
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
@@ -162,12 +252,32 @@ fn forty_eight_handler(
         .into_mp4(params.fps.unwrap_or(20))
 }
 
+fn html_page(video: &str) -> poem::Result<poem::Response> {
+    return Ok(poem::Response::builder()
+    .status(StatusCode::OK)
+    .content_type("text/html; charset=utf-8")
+    .body(format!(
+        "<html><head><style>video {{ top: 0; left: 0; bottom: 0; right: 0; position: absolute; background-color: black }} html {{ background-color: black }} </style></head><body><video controls loop autoplay><source src=\"{}\" type=\"video/mp4\"></video></body></html>",
+        video
+    )));
+}
+
 #[handler]
 fn twenty_four_handler(
     Path(folder): Path<String>,
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
+    headers: &HeaderMap,
 ) -> poem::Result<poem::Response> {
+    let sec_fetch_dest = headers.get("sec-fetch-dest").unwrap();
+
+    if sec_fetch_dest == "document" {
+        return html_page(&format!("./{}?{}", folder, params.0.as_str()));
+    }
+
+    // trim the trailing ".mp4" from folder
+    let folder = folder.trim_end_matches(".mp4");
+
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
@@ -181,7 +291,17 @@ fn day_handler(
     Path((day, folder)): Path<(String, String)>,
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
+    headers: &HeaderMap,
 ) -> poem::Result<poem::Response> {
+    let sec_fetch_dest = headers.get("sec-fetch-dest").unwrap();
+
+    if sec_fetch_dest == "document" {
+        return html_page(&format!("./{}?{}", folder, params.0.as_str()));
+    }
+
+    // trim the trailing ".mp4" from folder
+    let folder = folder.trim_end_matches(".mp4");
+
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
@@ -202,7 +322,17 @@ fn exact_handler(
     Path((start, end, folder)): Path<(String, String, String)>,
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
+    headers: &HeaderMap,
 ) -> poem::Result<poem::Response> {
+    let sec_fetch_dest = headers.get("sec-fetch-dest").unwrap();
+
+    if sec_fetch_dest == "document" {
+        return html_page(&format!("./{}?{}", folder, params.0.as_str()));
+    }
+
+    // trim the trailing ".mp4" from folder
+    let folder = folder.trim_end_matches(".mp4");
+
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
