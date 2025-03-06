@@ -15,6 +15,7 @@ use std::{env, fs, io::Cursor};
 #[derive(Deserialize)]
 struct QueryParams {
     fps: Option<usize>,
+    ffmpeg_args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,7 +79,11 @@ impl FrameCollection {
         self.frames.into_iter().map(|frame| frame.path).collect()
     }
 
-    fn into_mp4(self, fps: usize) -> poem::Result<poem::Response> {
+    fn into_mp4(
+        self,
+        fps: usize,
+        args_override: Option<Vec<String>>,
+    ) -> poem::Result<poem::Response> {
         if self.frames.len() == 0 {
             return Ok(poem::Response::builder()
                 .status(StatusCode::NOT_FOUND)
@@ -86,25 +91,29 @@ impl FrameCollection {
         }
 
         let mut child = Command::new("ffmpeg")
-            .arg("-safe")
-            .arg("0")
-            .arg("-protocol_whitelist")
-            .arg("pipe,file")
-            .arg("-f")
-            .arg("concat")
-            .arg("-i")
-            .arg("pipe:0")
-            .arg("-c:v")
-            .arg("libx264")
-            .arg("-preset")
-            .arg("ultrafast")
-            .arg("-crf")
-            .arg("18")
-            .arg("-movflags")
-            .arg("faststart")
-            .arg("-f")
-            .arg("mp4")
-            .arg("pipe:1")
+            .args(args_override.unwrap_or_else(|| {
+                vec![
+                    "-safe".to_string(),
+                    "0".to_string(),
+                    "-protocol_whitelist".to_string(),
+                    "pipe,file".to_string(),
+                    "-f".to_string(),
+                    "concat".to_string(),
+                    "-i".to_string(),
+                    "pipe:0".to_string(),
+                    "-c:v".to_string(),
+                    "libx264".to_string(),
+                    "-preset".to_string(),
+                    "ultrafast".to_string(),
+                    "-crf".to_string(),
+                    "18".to_string(),
+                    "-movflags".to_string(),
+                    "faststart".to_string(),
+                    "-f".to_string(),
+                    "mp4".to_string(),
+                    "pipe:1".to_string(),
+                ]
+            }))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -165,7 +174,7 @@ fn week_handler(
 
     frame_collection
         .get_past_days(7)
-        .into_mp4(params.fps.unwrap_or(20))
+        .into_mp4(params.fps.unwrap_or(20), params.ffmpeg_args.clone())
 }
 
 #[handler]
@@ -179,7 +188,7 @@ fn forty_eight_handler(
 
     frame_collection
         .get_past_days(2)
-        .into_mp4(params.fps.unwrap_or(20))
+        .into_mp4(params.fps.unwrap_or(20), params.ffmpeg_args.clone())
 }
 
 #[handler]
@@ -193,7 +202,7 @@ fn twenty_four_handler(
 
     frame_collection
         .get_past_days(1)
-        .into_mp4(params.fps.unwrap_or(20))
+        .into_mp4(params.fps.unwrap_or(20), params.ffmpeg_args.clone())
 }
 
 #[handler]
@@ -214,7 +223,7 @@ fn day_handler(
 
     frame_collection
         .get_range(start.into(), end.into())
-        .into_mp4(params.fps.unwrap_or(20))
+        .into_mp4(params.fps.unwrap_or(20), params.ffmpeg_args.clone())
 }
 
 #[handler]
@@ -231,7 +240,7 @@ fn exact_handler(
 
     frame_collection
         .get_range(start.into(), end.into())
-        .into_mp4(params.fps.unwrap_or(20))
+        .into_mp4(params.fps.unwrap_or(20), params.ffmpeg_args.clone())
 }
 
 #[tokio::main]
