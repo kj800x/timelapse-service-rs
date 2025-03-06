@@ -117,6 +117,9 @@ impl FrameCollection {
             ffmpeg_input.push_str(&format!("file 'file:{}'\n", path.to_str().unwrap()));
             ffmpeg_input.push_str(&format!("outpoint {:.2}\n", 1f32 / fps as f32));
         }
+
+        println!("ffmpeg input: {}", ffmpeg_input);
+
         std::thread::spawn(move || {
             stdin
                 .write_all(ffmpeg_input.as_bytes())
