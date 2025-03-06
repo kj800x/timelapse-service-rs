@@ -10,7 +10,8 @@ use std::fmt::{self, Display, Formatter};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::{env, fs, io::Cursor};
+use std::{env, fs};
+use tempfile::NamedTempFile;
 
 #[derive(Clone)]
 struct CommaSeparatedString(Vec<String>);
@@ -84,6 +85,12 @@ impl FrameCollection {
             .map(|frame| frame.clone())
             .collect();
 
+        println!(
+            "Found {} frames between {} and {}",
+            frames.len(),
+            start.format("%Y-%m-%d %H:%M:%S UTC"),
+            end.format("%Y-%m-%d %H:%M:%S UTC")
+        );
         frames.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
         FrameCollection { frames }
@@ -111,9 +118,13 @@ impl FrameCollection {
                 .body(()));
         }
 
+        let temp_file = NamedTempFile::new().expect("Failed to create temporary file");
+        let temp_path = temp_file.path().to_str().unwrap().to_string();
+
         let mut child = Command::new("ffmpeg")
             .args(args_override.unwrap_or_else(|| {
                 vec![
+                    "-y".to_string(),
                     "-safe".to_string(),
                     "0".to_string(),
                     "-protocol_whitelist".to_string(),
@@ -129,10 +140,10 @@ impl FrameCollection {
                     "-crf".to_string(),
                     "18".to_string(),
                     "-movflags".to_string(),
-                    "faststart".to_string(),
+                    "+faststart".to_string(),
                     "-f".to_string(),
                     "mp4".to_string(),
-                    "pipe:1".to_string(),
+                    temp_path.to_string(),
                 ]
             }))
             .stdin(Stdio::piped())
@@ -148,8 +159,6 @@ impl FrameCollection {
             ffmpeg_input.push_str(&format!("outpoint {:.2}\n", 1f32 / fps as f32));
         }
 
-        println!("ffmpeg input: {}", ffmpeg_input);
-
         std::thread::spawn(move || {
             stdin
                 .write_all(ffmpeg_input.as_bytes())
@@ -158,18 +167,34 @@ impl FrameCollection {
 
         let output = child.wait_with_output().expect("Failed to read stdout");
 
-        if !output.stderr.is_empty() {
-            eprintln!("ffmpeg stderr: {}", String::from_utf8_lossy(&output.stderr));
-        }
-
-        if output.stdout.is_empty() {
+        // Only show FFmpeg output if there was an error
+        if !output.status.success() {
+            eprintln!("FFmpeg failed with status: {}", output.status);
+            if !output.stderr.is_empty() {
+                eprintln!("FFmpeg error: {}", String::from_utf8_lossy(&output.stderr));
+            }
             return Ok(poem::Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body("ffmpeg produced no output"));
+                .body("ffmpeg failed to create video"));
         }
 
-        let curs = Cursor::new(output.stdout);
-        Ok(Binary(curs.get_ref().clone())
+        // Read the temporary file into memory
+        let video_data = match fs::read(&temp_path) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Failed to read temporary file: {}", e);
+                return Ok(poem::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body("failed to read output video"));
+            }
+        };
+
+        println!(
+            "Successfully created {:.1}MB video",
+            video_data.len() as f64 / 1_048_576.0
+        );
+
+        Ok(Binary(video_data)
             .with_content_type("video/mp4")
             .into_response())
     }
