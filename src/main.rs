@@ -107,7 +107,7 @@ impl FrameCollection {
             .arg("pipe:1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("Failed to spawn child process");
 
@@ -127,6 +127,17 @@ impl FrameCollection {
         });
 
         let output = child.wait_with_output().expect("Failed to read stdout");
+
+        if !output.stderr.is_empty() {
+            eprintln!("ffmpeg stderr: {}", String::from_utf8_lossy(&output.stderr));
+        }
+
+        if output.stdout.is_empty() {
+            return Ok(poem::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body("ffmpeg produced no output"));
+        }
+
         let curs = Cursor::new(output.stdout);
         Ok(Binary(curs.get_ref().clone())
             .with_content_type("video/mp4")
