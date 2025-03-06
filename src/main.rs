@@ -12,10 +12,31 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::{env, fs, io::Cursor};
 
+#[derive(Clone)]
+struct CommaSeparatedString(Vec<String>);
+
+impl<'de> Deserialize<'de> for CommaSeparatedString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s: String = Deserialize::deserialize(deserializer)?;
+        Ok(CommaSeparatedString(
+            s.split(',').map(|s| s.to_string()).collect(),
+        ))
+    }
+}
+
+impl From<CommaSeparatedString> for Vec<String> {
+    fn from(value: CommaSeparatedString) -> Self {
+        value.0
+    }
+}
+
 #[derive(Deserialize)]
 struct QueryParams {
     fps: Option<usize>,
-    ffmpeg_args: Option<Vec<String>>,
+    ffmpeg_args: Option<CommaSeparatedString>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,9 +193,10 @@ fn week_handler(
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
-    frame_collection
-        .get_past_days(7)
-        .into_mp4(params.fps.unwrap_or(20), params.ffmpeg_args.clone())
+    frame_collection.get_past_days(7).into_mp4(
+        params.fps.unwrap_or(20),
+        params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+    )
 }
 
 #[handler]
@@ -186,9 +208,10 @@ fn forty_eight_handler(
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
-    frame_collection
-        .get_past_days(2)
-        .into_mp4(params.fps.unwrap_or(20), params.ffmpeg_args.clone())
+    frame_collection.get_past_days(2).into_mp4(
+        params.fps.unwrap_or(20),
+        params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+    )
 }
 
 #[handler]
@@ -200,9 +223,10 @@ fn twenty_four_handler(
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
-    frame_collection
-        .get_past_days(1)
-        .into_mp4(params.fps.unwrap_or(20), params.ffmpeg_args.clone())
+    frame_collection.get_past_days(1).into_mp4(
+        params.fps.unwrap_or(20),
+        params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+    )
 }
 
 #[handler]
@@ -223,7 +247,10 @@ fn day_handler(
 
     frame_collection
         .get_range(start.into(), end.into())
-        .into_mp4(params.fps.unwrap_or(20), params.ffmpeg_args.clone())
+        .into_mp4(
+            params.fps.unwrap_or(20),
+            params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+        )
 }
 
 #[handler]
@@ -240,7 +267,10 @@ fn exact_handler(
 
     frame_collection
         .get_range(start.into(), end.into())
-        .into_mp4(params.fps.unwrap_or(20), params.ffmpeg_args.clone())
+        .into_mp4(
+            params.fps.unwrap_or(20),
+            params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+        )
 }
 
 #[tokio::main]
