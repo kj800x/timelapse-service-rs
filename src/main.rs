@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use maud::{html, Markup};
 use poem::http::StatusCode;
 use poem::listener::TcpListener;
 use poem::web::{Data, Path, Query};
@@ -194,7 +195,7 @@ impl FrameCollection {
             video_data.len() as f64 / 1_048_576.0
         );
 
-        Ok(Binary(video_data)
+        Ok(<Vec<u8> as Clone>::clone(&Binary(video_data.clone()))
             .with_content_type("video/mp4")
             .into_response())
     }
@@ -298,6 +299,76 @@ fn exact_handler(
         )
 }
 
+#[handler]
+fn timelapse_index_handler(Data(FrameFolder(frame_folder)): Data<&FrameFolder>) -> Markup {
+    // Read the files in the folder
+    let folders: Vec<String> = fs::read_dir(&frame_folder)
+        .unwrap()
+        .filter_map(|entry| {
+            let entry = entry.unwrap();
+            let file_name = entry.file_name().into_string().unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                Some(file_name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    html! {
+        style {
+            "body { font-family: sans-serif; color: white; background-color: #333; }"
+            "h1, h2 { color: #f90; }"
+            "h3 { color: #f90; }"
+            "a { color: #f90; text-decoration: none; }"
+            "a:hover { text-decoration: underline; }"
+            "p { margin-bottom: 1em; }"
+            "body { max-width: 800px; margin: 0 auto; padding: 1em; }"s
+            "h1 { font-size: 2em; }"
+            "h2 { font-size: 1.5em; }"
+            "h3 { font-size: 1.2em; }"
+            "ul { list-style-type: none; }"
+            "li { margin-bottom: 1em; }"
+        }
+        h1 { "Timelapse API" }
+        p { "This API generates timelapse videos from a folder of images." }
+        h2 { "Folders" }
+        ul {
+            @for folder in folders {
+                h3 {(folder)}
+                ul {
+                    li { a href=(format!("/timelapse/24/{}", folder)) { "24 hours" } }
+                    li { a href=(format!("/timelapse/48/{}", folder)) { "48 hours" } }
+                    li { a href=(format!("/timelapse/1w/{}", folder)) { "1 week" } }
+                    li { a href=(format!("/timelapse/day/YYYY-MM-DD/{}", folder)) { "Specific day" } " (invalid link)" }
+                    li { a href=(format!("/timelapse/from/[ISO8601]/to/[ISO8601]/{}", folder)) { "Specific range" } " (invalid link)" }
+                }
+            }
+        }
+        h2 { "Endpoints" }
+        ul {
+            li { pre { "GET /timelapse/24/:folder" } }
+            li { pre { "GET /timelapse/48/:folder"}  }
+            li { pre { "GET /timelapse/1w/:folder" } }
+            li { pre { "GET /timelapse/day/YYYY-MM-DD/:folder" } }
+            li { pre { "GET /timelapse/from/[ISO8601]/to/[ISO8601]/:folder" } }
+        }
+    }
+}
+
+#[handler]
+fn index_redirect_handler() -> impl IntoResponse {
+    poem::Response::builder()
+        .status(StatusCode::MOVED_PERMANENTLY)
+        .header("Location", "/timelapse/")
+        .body(())
+}
+
+#[handler]
+fn healthcheck() -> impl IntoResponse {
+    poem::Response::builder().status(StatusCode::OK).body("OK")
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = "0.0.0.0";
@@ -328,6 +399,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest("/timelapse/1w", week_service)
         .nest("/timelapse/day", day_service)
         .nest("/timelapse/from", exact_service)
+        .at("/timelapse/", get(timelapse_index_handler))
+        .at("/timelapse", get(timelapse_index_handler))
+        .at("/healthcheck", get(healthcheck))
+        .at("/", get(index_redirect_handler))
         .data(frame_folder);
     Server::new(TcpListener::bind(format!("{host}:{port}")))
         .run(route)
