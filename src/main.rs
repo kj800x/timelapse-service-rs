@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::{env, fs};
 use tempfile::NamedTempFile;
+use zip::write::FileOptions;
 
 #[derive(Clone)]
 struct CommaSeparatedString(Vec<String>);
@@ -39,6 +40,7 @@ impl From<CommaSeparatedString> for Vec<String> {
 struct QueryParams {
     fps: Option<usize>,
     ffmpeg_args: Option<CommaSeparatedString>,
+    format: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -180,7 +182,7 @@ impl FrameCollection {
         }
 
         // Read the temporary file into memory
-        let video_data = match fs::read(&temp_path) {
+        let video_data = match fs::read(temp_path) {
             Ok(data) => data,
             Err(e) => {
                 eprintln!("Failed to read temporary file: {}", e);
@@ -195,9 +197,90 @@ impl FrameCollection {
             video_data.len() as f64 / 1_048_576.0
         );
 
-        Ok(<Vec<u8> as Clone>::clone(&Binary(video_data.clone()))
-            .with_content_type("video/mp4")
-            .into_response())
+        Ok(poem::Response::builder()
+            .header("Content-Type", "video/mp4")
+            .body(video_data))
+    }
+
+    fn into_zip(mut self) -> poem::Result<poem::Response> {
+        if self.frames.len() == 0 {
+            return Ok(poem::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(()));
+        }
+
+        let temp_file = NamedTempFile::new().expect("Failed to create temporary file");
+        let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(temp_file.as_file()));
+        let options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        let frame_count = self.frames.len();
+        while let Some(frame) = self.frames.pop() {
+            let file_name = format!("{}.jpg", frame.timestamp);
+            if let Err(e) = zip.start_file(&file_name, options) {
+                eprintln!("Failed to start file in zip: {}", e);
+                return Ok(poem::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body("failed to create zip file"));
+            }
+
+            match fs::read(&frame.path) {
+                Ok(contents) => {
+                    if let Err(e) = zip.write_all(&contents) {
+                        eprintln!("Failed to write file to zip: {}", e);
+                        return Ok(poem::Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body("failed to create zip file"));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to read frame file: {}", e);
+                    return Ok(poem::Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body("failed to read frame file"));
+                }
+            }
+        }
+
+        if let Err(e) = zip.finish() {
+            eprintln!("Failed to finish zip file: {}", e);
+            return Ok(poem::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body("failed to create zip file"));
+        }
+        drop(zip);
+
+        // Read the temporary file into memory
+        let zip_data = match fs::read(temp_file.path()) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Failed to read temporary file: {}", e);
+                return Ok(poem::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body("failed to read zip file"));
+            }
+        };
+
+        println!(
+            "Successfully created {:.1}MB zip archive with {} frames",
+            zip_data.len() as f64 / 1_048_576.0,
+            frame_count
+        );
+
+        Ok(poem::Response::builder()
+            .header("Content-Type", "application/zip")
+            .body(zip_data))
+    }
+
+    fn into_response(
+        self,
+        fps: usize,
+        args_override: Option<Vec<String>>,
+        format: Option<&str>,
+    ) -> poem::Result<poem::Response> {
+        match format {
+            Some("zip") => self.into_zip(),
+            _ => self.into_mp4(fps, args_override),
+        }
     }
 }
 
@@ -219,9 +302,10 @@ fn week_handler(
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
-    frame_collection.get_past_days(7).into_mp4(
+    frame_collection.get_past_days(7).into_response(
         params.fps.unwrap_or(20),
         params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+        params.format.as_deref(),
     )
 }
 
@@ -234,9 +318,10 @@ fn forty_eight_handler(
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
-    frame_collection.get_past_days(2).into_mp4(
+    frame_collection.get_past_days(2).into_response(
         params.fps.unwrap_or(20),
         params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+        params.format.as_deref(),
     )
 }
 
@@ -249,9 +334,10 @@ fn twenty_four_handler(
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
-    frame_collection.get_past_days(1).into_mp4(
+    frame_collection.get_past_days(1).into_response(
         params.fps.unwrap_or(20),
         params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+        params.format.as_deref(),
     )
 }
 
@@ -273,9 +359,10 @@ fn day_handler(
 
     frame_collection
         .get_range(start.into(), end.into())
-        .into_mp4(
+        .into_response(
             params.fps.unwrap_or(20),
             params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+            params.format.as_deref(),
         )
 }
 
@@ -293,9 +380,10 @@ fn exact_handler(
 
     frame_collection
         .get_range(start.into(), end.into())
-        .into_mp4(
+        .into_response(
             params.fps.unwrap_or(20),
             params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+            params.format.as_deref(),
         )
 }
 
