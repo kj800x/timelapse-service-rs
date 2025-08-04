@@ -18,7 +18,7 @@ use zip::write::FileOptions;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct CacheKey {
-    folder: String,
+    first_frame: String,
     start: String,
     end: String,
     fps: usize,
@@ -161,7 +161,7 @@ impl FrameCollection {
         }
 
         let cache_key = CacheKey {
-            folder: self.frames[0].path.to_str().unwrap().to_string(),
+            first_frame: self.frames[0].path.to_str().unwrap().to_string(),
             start: self.frames[0].timestamp.to_string(),
             end: self.frames[self.frames.len() - 1].timestamp.to_string(),
             fps,
@@ -176,7 +176,7 @@ impl FrameCollection {
                 .body(cached.clone()));
         }
 
-        println!("Cache miss");
+        println!("Cache miss: {:?}", cache_key);
         let temp_file = NamedTempFile::new().expect("Failed to create temporary file");
         let temp_path = temp_file.path().to_str().unwrap().to_string();
 
