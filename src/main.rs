@@ -6,11 +6,50 @@ use poem::IntoResponse;
 use poem::{get, handler, EndpointExt, Route, Server};
 use poem_openapi::payload::Binary;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::{env, fs, io::Cursor};
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct CacheKey {
+    folder: String,
+    start: String,
+    end: String,
+    fps: usize,
+    args_override: Option<Vec<String>>,
+}
+
+struct VideoCache {
+    cache: HashMap<CacheKey, Vec<u8>>,
+    keys: Vec<CacheKey>,
+    size: usize,
+}
+
+impl VideoCache {
+    fn new(size: usize) -> Self {
+        VideoCache {
+            cache: HashMap::new(),
+            keys: Vec::new(),
+            size,
+        }
+    }
+
+    fn get(&self, key: &CacheKey) -> Option<&Vec<u8>> {
+        self.cache.get(key)
+    }
+
+    fn set(&mut self, key: CacheKey, value: Vec<u8>) {
+        if self.cache.len() >= self.size {
+            self.cache.remove(&self.keys.remove(0));
+        }
+        self.cache.insert(key.clone(), value);
+        self.keys.push(key);
+    }
+}
 
 #[derive(Clone)]
 struct CommaSeparatedString(Vec<String>);
@@ -104,6 +143,7 @@ impl FrameCollection {
         self,
         fps: usize,
         args_override: Option<Vec<String>>,
+        cache: &mut VideoCache,
     ) -> poem::Result<poem::Response> {
         if self.frames.len() == 0 {
             return Ok(poem::Response::builder()
@@ -111,6 +151,23 @@ impl FrameCollection {
                 .body(()));
         }
 
+        let cache_key = CacheKey {
+            folder: self.frames[0].path.to_str().unwrap().to_string(),
+            start: self.frames[0].timestamp.to_string(),
+            end: self.frames[self.frames.len() - 1].timestamp.to_string(),
+            fps,
+            args_override: args_override.clone(),
+        };
+
+        if let Some(cached) = cache.get(&cache_key) {
+            println!("Cache hit: {:?}", cache_key);
+            return Ok(Binary(cached.clone())
+                .with_content_type("video/mp4")
+                .with_header("X-Cache-Hit", "true")
+                .into_response());
+        }
+
+        println!("Cache miss");
         let mut child = Command::new("ffmpeg")
             .args(args_override.unwrap_or_else(|| {
                 vec![
@@ -169,8 +226,10 @@ impl FrameCollection {
         }
 
         let curs = Cursor::new(output.stdout);
+        cache.set(cache_key, curs.get_ref().clone());
         Ok(Binary(curs.get_ref().clone())
             .with_content_type("video/mp4")
+            .with_header("X-Cache-Hit", "false")
             .into_response())
     }
 }
@@ -189,6 +248,7 @@ fn week_handler(
     Path(folder): Path<String>,
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
+    Data(cache): Data<&Arc<Mutex<VideoCache>>>,
 ) -> poem::Result<poem::Response> {
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
@@ -196,6 +256,7 @@ fn week_handler(
     frame_collection.get_past_days(7).into_mp4(
         params.fps.unwrap_or(20),
         params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+        &mut cache.lock().unwrap(),
     )
 }
 
@@ -204,6 +265,7 @@ fn forty_eight_handler(
     Path(folder): Path<String>,
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
+    Data(cache): Data<&Arc<Mutex<VideoCache>>>,
 ) -> poem::Result<poem::Response> {
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
@@ -211,6 +273,7 @@ fn forty_eight_handler(
     frame_collection.get_past_days(2).into_mp4(
         params.fps.unwrap_or(20),
         params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+        &mut cache.lock().unwrap(),
     )
 }
 
@@ -219,6 +282,7 @@ fn twenty_four_handler(
     Path(folder): Path<String>,
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
+    Data(cache): Data<&Arc<Mutex<VideoCache>>>,
 ) -> poem::Result<poem::Response> {
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
@@ -226,6 +290,7 @@ fn twenty_four_handler(
     frame_collection.get_past_days(1).into_mp4(
         params.fps.unwrap_or(20),
         params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+        &mut cache.lock().unwrap(),
     )
 }
 
@@ -234,6 +299,7 @@ fn day_handler(
     Path((day, folder)): Path<(String, String)>,
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
+    Data(cache): Data<&Arc<Mutex<VideoCache>>>,
 ) -> poem::Result<poem::Response> {
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
@@ -250,6 +316,7 @@ fn day_handler(
         .into_mp4(
             params.fps.unwrap_or(20),
             params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+            &mut cache.lock().unwrap(),
         )
 }
 
@@ -258,6 +325,7 @@ fn exact_handler(
     Path((start, end, folder)): Path<(String, String, String)>,
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
+    Data(cache): Data<&Arc<Mutex<VideoCache>>>,
 ) -> poem::Result<poem::Response> {
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
@@ -270,6 +338,7 @@ fn exact_handler(
         .into_mp4(
             params.fps.unwrap_or(20),
             params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+            &mut cache.lock().unwrap(),
         )
 }
 
@@ -279,6 +348,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port: i32 = env::var("PORT").map(|x| x.parse().unwrap()).unwrap_or(8102);
     let frame_folder =
         FrameFolder(env::var("OUTPUT_FOLDER").expect("OUTPUT_FOLDER env var required"));
+    let cache = Arc::new(Mutex::new(VideoCache::new(10)));
     println!(
         "OUTPUT_FOLDER: {}\nPort: {}\nHost: {}",
         frame_folder, port, host
@@ -303,7 +373,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest("/timelapse/1w", week_service)
         .nest("/timelapse/day", day_service)
         .nest("/timelapse/from", exact_service)
-        .data(frame_folder);
+        .data(frame_folder)
+        .data(cache);
     Server::new(TcpListener::bind(format!("{host}:{port}")))
         .run(route)
         .await?;
