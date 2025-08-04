@@ -81,6 +81,11 @@ fn handle_range_requests(
 ) -> poem::Response {
     let file_size: u64 = data.len() as u64;
 
+    // Calculate cache expiration time (15 minutes from now)
+    let cache_max_age = 900; // 15 minutes in seconds
+    let expires_time = Utc::now() + chrono::Duration::seconds(cache_max_age);
+    let expires_header = expires_time.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+
     if let Some(range_header) = range_header {
         let range_str = range_header.to_str().unwrap();
         let parts: Vec<&str> = range_str.split("bytes=").collect();
@@ -108,6 +113,8 @@ fn handle_range_requests(
             .header(http::header::CONTENT_LENGTH, content_length)
             .header("Content-Type", "video/mp4")
             .header("X-Cache-Hit", is_cache_hit.to_string())
+            .header(http::header::CACHE_CONTROL, format!("public, max-age={}", cache_max_age))
+            .header(http::header::EXPIRES, expires_header.clone())
             .body(data[start_byte as usize..(end_byte + 1) as usize].to_vec())
     } else {
         poem::Response::builder()
@@ -115,6 +122,8 @@ fn handle_range_requests(
             .header("Content-Type", "video/mp4")
             .header(http::header::CONTENT_LENGTH, file_size)
             .header("X-Cache-Hit", is_cache_hit.to_string())
+            .header(http::header::CACHE_CONTROL, format!("public, max-age={}", cache_max_age))
+            .header(http::header::EXPIRES, expires_header)
             .body(data)
     }
 }
@@ -584,6 +593,55 @@ fn index_redirect_handler() -> impl IntoResponse {
 #[handler]
 fn healthcheck() -> impl IntoResponse {
     poem::Response::builder().status(StatusCode::OK).body("OK")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use poem::http::HeaderValue;
+
+    #[test]
+    fn test_handle_range_requests_sets_cache_headers() {
+        let test_data = vec![1, 2, 3, 4, 5];
+        let response = handle_range_requests(test_data.clone(), false, None);
+        
+        // Check that Cache-Control header is set
+        let cache_control = response.headers().get(http::header::CACHE_CONTROL);
+        assert!(cache_control.is_some());
+        assert_eq!(cache_control.unwrap().to_str().unwrap(), "public, max-age=900");
+        
+        // Check that Expires header is set
+        let expires = response.headers().get(http::header::EXPIRES);
+        assert!(expires.is_some());
+        // We can't check the exact value since it depends on current time,
+        // but we can verify it's in the correct format (contains GMT)
+        assert!(expires.unwrap().to_str().unwrap().contains("GMT"));
+        
+        // Verify other existing headers are still present
+        let content_type = response.headers().get("content-type");
+        assert!(content_type.is_some());
+        assert_eq!(content_type.unwrap().to_str().unwrap(), "video/mp4");
+    }
+
+    #[test]
+    fn test_handle_range_requests_with_range_sets_cache_headers() {
+        let test_data = vec![1, 2, 3, 4, 5];
+        let range_header = HeaderValue::from_static("bytes=0-2");
+        let response = handle_range_requests(test_data.clone(), true, Some(&range_header));
+        
+        // Check that Cache-Control header is set for partial content too
+        let cache_control = response.headers().get(http::header::CACHE_CONTROL);
+        assert!(cache_control.is_some());
+        assert_eq!(cache_control.unwrap().to_str().unwrap(), "public, max-age=900");
+        
+        // Check that Expires header is set
+        let expires = response.headers().get(http::header::EXPIRES);
+        assert!(expires.is_some());
+        assert!(expires.unwrap().to_str().unwrap().contains("GMT"));
+        
+        // Verify the response is partial content
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    }
 }
 
 #[tokio::main]
