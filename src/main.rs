@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use maud::{html, Markup};
-use poem::http::StatusCode;
+use poem::http::{self, HeaderMap, HeaderValue, StatusCode};
 use poem::listener::TcpListener;
 use poem::web::{Data, Path, Query};
 use poem::IntoResponse;
@@ -71,6 +71,51 @@ impl<'de> Deserialize<'de> for CommaSeparatedString {
 impl From<CommaSeparatedString> for Vec<String> {
     fn from(value: CommaSeparatedString) -> Self {
         value.0
+    }
+}
+
+fn handle_range_requests(
+    data: Vec<u8>,
+    is_cache_hit: bool,
+    range_header: Option<&HeaderValue>,
+) -> poem::Response {
+    let file_size: u64 = data.len() as u64;
+
+    if let Some(range_header) = range_header {
+        let range_str = range_header.to_str().unwrap();
+        let parts: Vec<&str> = range_str.split("bytes=").collect();
+        let range_values: Vec<&str> = parts[1].split("-").collect();
+
+        let start_byte: u64 = range_values[0].parse().unwrap();
+        let end_byte: u64 = if range_values.len() > 1 && !range_values[1].is_empty() {
+            range_values[1].parse().unwrap()
+        } else {
+            file_size as u64 - 1
+        };
+
+        if start_byte >= file_size || end_byte >= file_size || start_byte > end_byte {
+            return poem::Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .body(());
+        }
+
+        let content_length = end_byte - start_byte + 1;
+        let content_range_header = format!("bytes {}-{}/{}", start_byte, end_byte, file_size);
+
+        poem::Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(http::header::CONTENT_RANGE, content_range_header)
+            .header(http::header::CONTENT_LENGTH, content_length)
+            .header("Content-Type", "video/mp4")
+            .header("X-Cache-Hit", is_cache_hit.to_string())
+            .body(data[start_byte as usize..(end_byte + 1) as usize].to_vec())
+    } else {
+        poem::Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "video/mp4")
+            .header(http::header::CONTENT_LENGTH, file_size)
+            .header("X-Cache-Hit", is_cache_hit.to_string())
+            .body(data)
     }
 }
 
@@ -153,6 +198,7 @@ impl FrameCollection {
         fps: usize,
         args_override: Option<Vec<String>>,
         cache: &mut VideoCache,
+        headers: &HeaderMap,
     ) -> poem::Result<poem::Response> {
         if self.frames.len() == 0 {
             return Ok(poem::Response::builder()
@@ -170,10 +216,11 @@ impl FrameCollection {
 
         if let Some(cached) = cache.get(&cache_key) {
             println!("Cache hit: {:?}", cache_key);
-            return Ok(poem::Response::builder()
-                .header("Content-Type", "video/mp4")
-                .header("X-Cache-Hit", "true")
-                .body(cached.clone()));
+            return Ok(handle_range_requests(
+                cached.clone(),
+                true,
+                headers.get(http::header::RANGE),
+            ));
         }
 
         println!("Cache miss: {:?}", cache_key);
@@ -255,10 +302,11 @@ impl FrameCollection {
             video_data.len() as f64 / 1_048_576.0
         );
 
-        Ok(poem::Response::builder()
-            .header("Content-Type", "video/mp4")
-            .header("X-Cache-Hit", "false")
-            .body(video_data))
+        Ok(handle_range_requests(
+            video_data,
+            false,
+            headers.get(http::header::RANGE),
+        ))
     }
 
     fn into_zip(mut self) -> poem::Result<poem::Response> {
@@ -336,10 +384,11 @@ impl FrameCollection {
         args_override: Option<Vec<String>>,
         format: Option<&str>,
         cache: &mut VideoCache,
+        headers: &HeaderMap,
     ) -> poem::Result<poem::Response> {
         match format {
             Some("zip") => self.into_zip(),
-            _ => self.into_mp4(fps, args_override, cache),
+            _ => self.into_mp4(fps, args_override, cache, headers),
         }
     }
 }
@@ -359,6 +408,7 @@ fn week_handler(
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
     Data(cache): Data<&Arc<Mutex<VideoCache>>>,
+    headers: &HeaderMap,
 ) -> poem::Result<poem::Response> {
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
@@ -368,6 +418,7 @@ fn week_handler(
         params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
         params.format.as_deref(),
         &mut cache.lock().unwrap(),
+        headers,
     )
 }
 
@@ -377,6 +428,7 @@ fn forty_eight_handler(
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
     Data(cache): Data<&Arc<Mutex<VideoCache>>>,
+    headers: &HeaderMap,
 ) -> poem::Result<poem::Response> {
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
@@ -386,6 +438,7 @@ fn forty_eight_handler(
         params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
         params.format.as_deref(),
         &mut cache.lock().unwrap(),
+        headers,
     )
 }
 
@@ -395,6 +448,7 @@ fn twenty_four_handler(
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
     Data(cache): Data<&Arc<Mutex<VideoCache>>>,
+    headers: &HeaderMap,
 ) -> poem::Result<poem::Response> {
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
@@ -404,6 +458,7 @@ fn twenty_four_handler(
         params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
         params.format.as_deref(),
         &mut cache.lock().unwrap(),
+        headers,
     )
 }
 
@@ -413,6 +468,7 @@ fn day_handler(
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
     Data(cache): Data<&Arc<Mutex<VideoCache>>>,
+    headers: &HeaderMap,
 ) -> poem::Result<poem::Response> {
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
@@ -431,6 +487,7 @@ fn day_handler(
             params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
             params.format.as_deref(),
             &mut cache.lock().unwrap(),
+            headers,
         )
 }
 
@@ -440,6 +497,7 @@ fn exact_handler(
     Data(FrameFolder(frame_folder)): Data<&FrameFolder>,
     params: Query<QueryParams>,
     Data(cache): Data<&Arc<Mutex<VideoCache>>>,
+    headers: &HeaderMap,
 ) -> poem::Result<poem::Response> {
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
@@ -454,6 +512,7 @@ fn exact_handler(
             params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
             params.format.as_deref(),
             &mut cache.lock().unwrap(),
+            headers,
         )
 }
 
