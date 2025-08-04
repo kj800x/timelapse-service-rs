@@ -1,10 +1,10 @@
 use chrono::{DateTime, Utc};
+use maud::{html, Markup};
 use poem::http::StatusCode;
 use poem::listener::TcpListener;
 use poem::web::{Data, Path, Query};
 use poem::IntoResponse;
 use poem::{get, handler, EndpointExt, Route, Server};
-use poem_openapi::payload::Binary;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
@@ -12,7 +12,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::{env, fs, io::Cursor};
+use std::{env, fs};
+use tempfile::NamedTempFile;
+use zip::write::FileOptions;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct CacheKey {
@@ -76,6 +78,7 @@ impl From<CommaSeparatedString> for Vec<String> {
 struct QueryParams {
     fps: Option<usize>,
     ffmpeg_args: Option<CommaSeparatedString>,
+    format: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +126,12 @@ impl FrameCollection {
             .map(|frame| frame.clone())
             .collect();
 
+        println!(
+            "Found {} frames between {} and {}",
+            frames.len(),
+            start.format("%Y-%m-%d %H:%M:%S UTC"),
+            end.format("%Y-%m-%d %H:%M:%S UTC")
+        );
         frames.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
         FrameCollection { frames }
@@ -161,16 +170,20 @@ impl FrameCollection {
 
         if let Some(cached) = cache.get(&cache_key) {
             println!("Cache hit: {:?}", cache_key);
-            return Ok(Binary(cached.clone())
-                .with_content_type("video/mp4")
-                .with_header("X-Cache-Hit", "true")
-                .into_response());
+            return Ok(poem::Response::builder()
+                .header("Content-Type", "video/mp4")
+                .header("X-Cache-Hit", "true")
+                .body(cached.clone()));
         }
 
         println!("Cache miss");
+        let temp_file = NamedTempFile::new().expect("Failed to create temporary file");
+        let temp_path = temp_file.path().to_str().unwrap().to_string();
+
         let mut child = Command::new("ffmpeg")
             .args(args_override.unwrap_or_else(|| {
                 vec![
+                    "-y".to_string(),
                     "-safe".to_string(),
                     "0".to_string(),
                     "-protocol_whitelist".to_string(),
@@ -186,10 +199,10 @@ impl FrameCollection {
                     "-crf".to_string(),
                     "18".to_string(),
                     "-movflags".to_string(),
-                    "faststart".to_string(),
+                    "+faststart".to_string(),
                     "-f".to_string(),
                     "mp4".to_string(),
-                    "pipe:1".to_string(),
+                    temp_path.to_string(),
                 ]
             }))
             .stdin(Stdio::piped())
@@ -205,8 +218,6 @@ impl FrameCollection {
             ffmpeg_input.push_str(&format!("outpoint {:.2}\n", 1f32 / fps as f32));
         }
 
-        println!("ffmpeg input: {}", ffmpeg_input);
-
         std::thread::spawn(move || {
             stdin
                 .write_all(ffmpeg_input.as_bytes())
@@ -215,22 +226,121 @@ impl FrameCollection {
 
         let output = child.wait_with_output().expect("Failed to read stdout");
 
-        if !output.stderr.is_empty() {
-            eprintln!("ffmpeg stderr: {}", String::from_utf8_lossy(&output.stderr));
-        }
-
-        if output.stdout.is_empty() {
+        // Only show FFmpeg output if there was an error
+        if !output.status.success() {
+            eprintln!("FFmpeg failed with status: {}", output.status);
+            if !output.stderr.is_empty() {
+                eprintln!("FFmpeg error: {}", String::from_utf8_lossy(&output.stderr));
+            }
             return Ok(poem::Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body("ffmpeg produced no output"));
+                .body("ffmpeg failed to create video"));
         }
 
-        let curs = Cursor::new(output.stdout);
-        cache.set(cache_key, curs.get_ref().clone());
-        Ok(Binary(curs.get_ref().clone())
-            .with_content_type("video/mp4")
-            .with_header("X-Cache-Hit", "false")
-            .into_response())
+        // Read the temporary file into memory
+        let video_data = match fs::read(temp_path) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Failed to read temporary file: {}", e);
+                return Ok(poem::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body("failed to read output video"));
+            }
+        };
+
+        cache.set(cache_key, video_data.clone());
+
+        println!(
+            "Successfully created {:.1}MB video",
+            video_data.len() as f64 / 1_048_576.0
+        );
+
+        Ok(poem::Response::builder()
+            .header("Content-Type", "video/mp4")
+            .header("X-Cache-Hit", "false")
+            .body(video_data))
+    }
+
+    fn into_zip(mut self) -> poem::Result<poem::Response> {
+        if self.frames.len() == 0 {
+            return Ok(poem::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(()));
+        }
+
+        let temp_file = NamedTempFile::new().expect("Failed to create temporary file");
+        let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(temp_file.as_file()));
+        let options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        let frame_count = self.frames.len();
+        while let Some(frame) = self.frames.pop() {
+            let file_name = format!("{}.jpg", frame.timestamp);
+            if let Err(e) = zip.start_file(&file_name, options) {
+                eprintln!("Failed to start file in zip: {}", e);
+                return Ok(poem::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body("failed to create zip file"));
+            }
+
+            match fs::read(&frame.path) {
+                Ok(contents) => {
+                    if let Err(e) = zip.write_all(&contents) {
+                        eprintln!("Failed to write file to zip: {}", e);
+                        return Ok(poem::Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body("failed to create zip file"));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to read frame file: {}", e);
+                    return Ok(poem::Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body("failed to read frame file"));
+                }
+            }
+        }
+
+        if let Err(e) = zip.finish() {
+            eprintln!("Failed to finish zip file: {}", e);
+            return Ok(poem::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body("failed to create zip file"));
+        }
+        drop(zip);
+
+        // Read the temporary file into memory
+        let zip_data = match fs::read(temp_file.path()) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Failed to read temporary file: {}", e);
+                return Ok(poem::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body("failed to read zip file"));
+            }
+        };
+
+        println!(
+            "Successfully created {:.1}MB zip archive with {} frames",
+            zip_data.len() as f64 / 1_048_576.0,
+            frame_count
+        );
+
+        Ok(poem::Response::builder()
+            .header("Content-Type", "application/zip")
+            .body(zip_data))
+    }
+
+    fn into_response(
+        self,
+        fps: usize,
+        args_override: Option<Vec<String>>,
+        format: Option<&str>,
+        cache: &mut VideoCache,
+    ) -> poem::Result<poem::Response> {
+        match format {
+            Some("zip") => self.into_zip(),
+            _ => self.into_mp4(fps, args_override, cache),
+        }
     }
 }
 
@@ -253,9 +363,10 @@ fn week_handler(
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
-    frame_collection.get_past_days(7).into_mp4(
+    frame_collection.get_past_days(7).into_response(
         params.fps.unwrap_or(20),
         params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+        params.format.as_deref(),
         &mut cache.lock().unwrap(),
     )
 }
@@ -270,9 +381,10 @@ fn forty_eight_handler(
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
-    frame_collection.get_past_days(2).into_mp4(
+    frame_collection.get_past_days(2).into_response(
         params.fps.unwrap_or(20),
         params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+        params.format.as_deref(),
         &mut cache.lock().unwrap(),
     )
 }
@@ -287,9 +399,10 @@ fn twenty_four_handler(
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
-    frame_collection.get_past_days(1).into_mp4(
+    frame_collection.get_past_days(1).into_response(
         params.fps.unwrap_or(20),
         params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+        params.format.as_deref(),
         &mut cache.lock().unwrap(),
     )
 }
@@ -313,9 +426,10 @@ fn day_handler(
 
     frame_collection
         .get_range(start.into(), end.into())
-        .into_mp4(
+        .into_response(
             params.fps.unwrap_or(20),
             params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+            params.format.as_deref(),
             &mut cache.lock().unwrap(),
         )
 }
@@ -335,11 +449,82 @@ fn exact_handler(
 
     frame_collection
         .get_range(start.into(), end.into())
-        .into_mp4(
+        .into_response(
             params.fps.unwrap_or(20),
             params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+            params.format.as_deref(),
             &mut cache.lock().unwrap(),
         )
+}
+
+#[handler]
+fn timelapse_index_handler(Data(FrameFolder(frame_folder)): Data<&FrameFolder>) -> Markup {
+    // Read the files in the folder
+    let folders: Vec<String> = fs::read_dir(&frame_folder)
+        .unwrap()
+        .filter_map(|entry| {
+            let entry = entry.unwrap();
+            let file_name = entry.file_name().into_string().unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                Some(file_name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    html! {
+        style {
+            "body { font-family: sans-serif; color: white; background-color: #333; }"
+            "h1, h2 { color: #f90; }"
+            "h3 { color: #f90; }"
+            "a { color: #f90; text-decoration: none; }"
+            "a:hover { text-decoration: underline; }"
+            "p { margin-bottom: 1em; }"
+            "body { max-width: 800px; margin: 0 auto; padding: 1em; }"s
+            "h1 { font-size: 2em; }"
+            "h2 { font-size: 1.5em; }"
+            "h3 { font-size: 1.2em; }"
+            "ul { list-style-type: none; }"
+            "li { margin-bottom: 1em; }"
+        }
+        h1 { "Timelapse API" }
+        p { "This API generates timelapse videos from a folder of images." }
+        h2 { "Folders" }
+        ul {
+            @for folder in folders {
+                h3 {(folder)}
+                ul {
+                    li { a href=(format!("/timelapse/24/{}", folder)) { "24 hours" } }
+                    li { a href=(format!("/timelapse/48/{}", folder)) { "48 hours" } }
+                    li { a href=(format!("/timelapse/1w/{}", folder)) { "1 week" } }
+                    li { a href=(format!("/timelapse/day/YYYY-MM-DD/{}", folder)) { "Specific day" } " (invalid link)" }
+                    li { a href=(format!("/timelapse/from/[ISO8601]/to/[ISO8601]/{}", folder)) { "Specific range" } " (invalid link)" }
+                }
+            }
+        }
+        h2 { "Endpoints" }
+        ul {
+            li { pre { "GET /timelapse/24/:folder" } }
+            li { pre { "GET /timelapse/48/:folder"}  }
+            li { pre { "GET /timelapse/1w/:folder" } }
+            li { pre { "GET /timelapse/day/YYYY-MM-DD/:folder" } }
+            li { pre { "GET /timelapse/from/[ISO8601]/to/[ISO8601]/:folder" } }
+        }
+    }
+}
+
+#[handler]
+fn index_redirect_handler() -> impl IntoResponse {
+    poem::Response::builder()
+        .status(StatusCode::MOVED_PERMANENTLY)
+        .header("Location", "/timelapse/")
+        .body(())
+}
+
+#[handler]
+fn healthcheck() -> impl IntoResponse {
+    poem::Response::builder().status(StatusCode::OK).body("OK")
 }
 
 #[tokio::main]
@@ -373,6 +558,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest("/timelapse/1w", week_service)
         .nest("/timelapse/day", day_service)
         .nest("/timelapse/from", exact_service)
+        .at("/timelapse/", get(timelapse_index_handler))
+        .at("/timelapse", get(timelapse_index_handler))
+        .at("/healthcheck", get(healthcheck))
+        .at("/", get(index_redirect_handler))
         .data(frame_folder)
         .data(cache);
     Server::new(TcpListener::bind(format!("{host}:{port}")))
