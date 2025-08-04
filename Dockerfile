@@ -42,10 +42,10 @@ RUN groupadd -r timelapse && useradd -r -g timelapse timelapse
 WORKDIR /app
 
 # Copy the binary from builder stage
-COPY --from=builder /usr/src/timelapse-service-rs/target/release/timelapse-service-rs .
+COPY --from=builder /usr/src/timelapse-service-rs/target/release/timelapse-service-rs /usr/bin/timelapse-service-rs
 
 # Change ownership to the non-root user
-RUN chown timelapse:timelapse /app/timelapse-service-rs
+RUN chown timelapse:timelapse /usr/bin/timelapse-service-rs
 
 # Switch to non-root user
 USER timelapse
@@ -54,4 +54,4 @@ USER timelapse
 EXPOSE 8102
 
 # Run the binary
-CMD ["./timelapse-service-rs"]
+CMD ["/usr/bin/timelapse-service-rs"]
