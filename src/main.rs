@@ -202,6 +202,31 @@ impl FrameCollection {
         self.frames.into_iter().map(|frame| frame.path).collect()
     }
 
+    fn get_default_ffmpeg_args(temp_path: &str) -> Vec<String> {
+        vec![
+            "-y".to_string(),
+            "-safe".to_string(),
+            "0".to_string(),
+            "-protocol_whitelist".to_string(),
+            "pipe,file".to_string(),
+            "-f".to_string(),
+            "concat".to_string(),
+            "-i".to_string(),
+            "pipe:0".to_string(),
+            "-c:v".to_string(),
+            "libx264".to_string(),
+            "-preset".to_string(),
+            "fast".to_string(),        // Changed from "ultrafast" to "fast" for better compression
+            "-crf".to_string(),
+            "23".to_string(),          // Changed from "18" to "23" for better compression (balanced quality)
+            "-movflags".to_string(),
+            "+faststart".to_string(),
+            "-f".to_string(),
+            "mp4".to_string(),
+            temp_path.to_string(),
+        ]
+    }
+
     fn into_mp4(
         self,
         fps: usize,
@@ -238,28 +263,7 @@ impl FrameCollection {
 
         let mut child = Command::new("ffmpeg")
             .args(args_override.unwrap_or_else(|| {
-                vec![
-                    "-y".to_string(),
-                    "-safe".to_string(),
-                    "0".to_string(),
-                    "-protocol_whitelist".to_string(),
-                    "pipe,file".to_string(),
-                    "-f".to_string(),
-                    "concat".to_string(),
-                    "-i".to_string(),
-                    "pipe:0".to_string(),
-                    "-c:v".to_string(),
-                    "libx264".to_string(),
-                    "-preset".to_string(),
-                    "ultrafast".to_string(),
-                    "-crf".to_string(),
-                    "18".to_string(),
-                    "-movflags".to_string(),
-                    "+faststart".to_string(),
-                    "-f".to_string(),
-                    "mp4".to_string(),
-                    temp_path.to_string(),
-                ]
+                Self::get_default_ffmpeg_args(&temp_path)
             }))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -641,6 +645,31 @@ mod tests {
         
         // Verify the response is partial content
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    }
+
+    #[test]
+    fn test_default_ffmpeg_args_use_better_compression() {
+        // Test that default ffmpeg args use compression-friendly settings
+        let temp_path = "/tmp/test.mp4";
+        
+        // Get the actual default args from the helper function
+        let default_args = FrameCollection::get_default_ffmpeg_args(temp_path);
+
+        // Check that preset is not "ultrafast" (which prioritizes speed over compression)
+        let preset_index = default_args.iter().position(|x| x == "-preset").unwrap();
+        let preset_value = &default_args[preset_index + 1];
+        assert_ne!(preset_value, "ultrafast", "Preset should not be 'ultrafast' for better compression");
+        
+        // Check that CRF is higher than 18 for better compression (lower file sizes)
+        let crf_index = default_args.iter().position(|x| x == "-crf").unwrap();
+        let crf_value = &default_args[crf_index + 1];
+        let crf_num: i32 = crf_value.parse().unwrap();
+        assert!(crf_num >= 23, "CRF should be 23 or higher for better compression, got {}", crf_num);
+        
+        // Ensure other important flags are still present
+        assert!(default_args.contains(&"-c:v".to_string()));
+        assert!(default_args.contains(&"libx264".to_string()));
+        assert!(default_args.contains(&"+faststart".to_string()));
     }
 }
 
