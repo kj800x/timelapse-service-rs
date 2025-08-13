@@ -219,6 +219,8 @@ impl FrameCollection {
             "fast".to_string(),        // Changed from "ultrafast" to "fast" for better compression
             "-crf".to_string(),
             "23".to_string(),          // Changed from "18" to "23" for better compression (balanced quality)
+            "-threads".to_string(),
+            "0".to_string(),           // Use all available CPU cores for faster encoding
             "-movflags".to_string(),
             "+faststart".to_string(),
             "-f".to_string(),
@@ -670,6 +672,12 @@ mod tests {
         assert!(default_args.contains(&"-c:v".to_string()));
         assert!(default_args.contains(&"libx264".to_string()));
         assert!(default_args.contains(&"+faststart".to_string()));
+        assert!(default_args.contains(&"-threads".to_string()));
+        
+        // Verify threads is set to use all available cores
+        let threads_index = default_args.iter().position(|x| x == "-threads").unwrap();
+        let threads_value = &default_args[threads_index + 1];
+        assert_eq!(threads_value, "0", "Should use all available CPU cores for encoding");
     }
 }
 
