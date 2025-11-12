@@ -1,0 +1,8 @@
+artifactRepo:
+  owner: kj800x
+  repo: timelapse-service-rs
+  branch: master
+
+team: home-sensors
+kind: service
+namespace: home-sensors

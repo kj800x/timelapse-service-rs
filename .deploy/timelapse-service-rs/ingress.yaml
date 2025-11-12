@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: timelapse-service-rs
+  namespace: home-sensors
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: timelapse.home.coolkev.com
+    traefik.ingress.kubernetes.io/router.tls.certresolver: letsencrypt
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: timelapse.home.coolkev.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: timelapse-service-rs
+                port:
+                  number: 80
