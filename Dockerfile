@@ -23,6 +23,10 @@ RUN cargo build --release
 RUN rm src/main.rs
 COPY src/ ./src/
 
+# Touch main.rs to ensure its mtime is newer than the dummy-compiled artifacts,
+# so Cargo detects the change and recompiles instead of reusing the dummy binary.
+RUN touch src/main.rs
+
 # Build the actual application
 RUN cargo build --release
 
