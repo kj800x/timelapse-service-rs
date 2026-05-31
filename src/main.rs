@@ -95,7 +95,7 @@ fn handle_range_requests(
         let end_byte: u64 = if range_values.len() > 1 && !range_values[1].is_empty() {
             range_values[1].parse().unwrap()
         } else {
-            file_size as u64 - 1
+            file_size - 1
         };
 
         if start_byte >= file_size || end_byte >= file_size || start_byte > end_byte {
@@ -113,7 +113,10 @@ fn handle_range_requests(
             .header(http::header::CONTENT_LENGTH, content_length)
             .header("Content-Type", "video/mp4")
             .header("X-Cache-Hit", is_cache_hit.to_string())
-            .header(http::header::CACHE_CONTROL, format!("public, max-age={}", cache_max_age))
+            .header(
+                http::header::CACHE_CONTROL,
+                format!("public, max-age={}", cache_max_age),
+            )
             .header(http::header::EXPIRES, expires_header.clone())
             .body(data[start_byte as usize..(end_byte + 1) as usize].to_vec())
     } else {
@@ -122,7 +125,10 @@ fn handle_range_requests(
             .header("Content-Type", "video/mp4")
             .header(http::header::CONTENT_LENGTH, file_size)
             .header("X-Cache-Hit", is_cache_hit.to_string())
-            .header(http::header::CACHE_CONTROL, format!("public, max-age={}", cache_max_age))
+            .header(
+                http::header::CACHE_CONTROL,
+                format!("public, max-age={}", cache_max_age),
+            )
             .header(http::header::EXPIRES, expires_header)
             .body(data)
     }
@@ -176,8 +182,7 @@ impl FrameCollection {
             .iter()
             .filter(|frame| {
                 frame.timestamp > start.timestamp() && frame.timestamp < end.timestamp()
-            })
-            .map(|frame| frame.clone())
+            }).cloned()
             .collect();
 
         println!(
@@ -186,7 +191,7 @@ impl FrameCollection {
             start.format("%Y-%m-%d %H:%M:%S UTC"),
             end.format("%Y-%m-%d %H:%M:%S UTC")
         );
-        frames.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        frames.sort_by_key(|a| a.timestamp);
 
         FrameCollection { frames }
     }
@@ -209,7 +214,7 @@ impl FrameCollection {
         cache: &mut VideoCache,
         headers: &HeaderMap,
     ) -> poem::Result<poem::Response> {
-        if self.frames.len() == 0 {
+        if self.frames.is_empty() {
             return Ok(poem::Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(()));
@@ -319,7 +324,7 @@ impl FrameCollection {
     }
 
     fn into_zip(mut self) -> poem::Result<poem::Response> {
-        if self.frames.len() == 0 {
+        if self.frames.is_empty() {
             return Ok(poem::Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(()));
@@ -528,7 +533,7 @@ fn exact_handler(
 #[handler]
 fn timelapse_index_handler(Data(FrameFolder(frame_folder)): Data<&FrameFolder>) -> Markup {
     // Read the files in the folder
-    let folders: Vec<String> = fs::read_dir(&frame_folder)
+    let folders: Vec<String> = fs::read_dir(frame_folder)
         .unwrap()
         .filter_map(|entry| {
             let entry = entry.unwrap();
@@ -604,19 +609,22 @@ mod tests {
     fn test_handle_range_requests_sets_cache_headers() {
         let test_data = vec![1, 2, 3, 4, 5];
         let response = handle_range_requests(test_data.clone(), false, None);
-        
+
         // Check that Cache-Control header is set
         let cache_control = response.headers().get(http::header::CACHE_CONTROL);
         assert!(cache_control.is_some());
-        assert_eq!(cache_control.unwrap().to_str().unwrap(), "public, max-age=900");
-        
+        assert_eq!(
+            cache_control.unwrap().to_str().unwrap(),
+            "public, max-age=900"
+        );
+
         // Check that Expires header is set
         let expires = response.headers().get(http::header::EXPIRES);
         assert!(expires.is_some());
         // We can't check the exact value since it depends on current time,
         // but we can verify it's in the correct format (contains GMT)
         assert!(expires.unwrap().to_str().unwrap().contains("GMT"));
-        
+
         // Verify other existing headers are still present
         let content_type = response.headers().get("content-type");
         assert!(content_type.is_some());
@@ -628,17 +636,20 @@ mod tests {
         let test_data = vec![1, 2, 3, 4, 5];
         let range_header = HeaderValue::from_static("bytes=0-2");
         let response = handle_range_requests(test_data.clone(), true, Some(&range_header));
-        
+
         // Check that Cache-Control header is set for partial content too
         let cache_control = response.headers().get(http::header::CACHE_CONTROL);
         assert!(cache_control.is_some());
-        assert_eq!(cache_control.unwrap().to_str().unwrap(), "public, max-age=900");
-        
+        assert_eq!(
+            cache_control.unwrap().to_str().unwrap(),
+            "public, max-age=900"
+        );
+
         // Check that Expires header is set
         let expires = response.headers().get(http::header::EXPIRES);
         assert!(expires.is_some());
         assert!(expires.unwrap().to_str().unwrap().contains("GMT"));
-        
+
         // Verify the response is partial content
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
     }
