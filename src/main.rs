@@ -182,7 +182,8 @@ impl FrameCollection {
             .iter()
             .filter(|frame| {
                 frame.timestamp > start.timestamp() && frame.timestamp < end.timestamp()
-            }).cloned()
+            })
+            .cloned()
             .collect();
 
         println!(
@@ -476,6 +477,26 @@ fn twenty_four_handler(
     )
 }
 
+/// Parse a timeline bound from a URL segment. Accepts either a full RFC 3339
+/// timestamp (e.g. `2026-09-14T08:00:00-04:00`) or a bare `YYYY-MM-DD` date,
+/// which is interpreted as the start (or, when `end_of_day` is set, the end)
+/// of that day in Eastern time.
+// TODO: what do we do for DST?
+fn parse_bound(input: &str, end_of_day: bool) -> poem::Result<DateTime<Utc>> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(input) {
+        return Ok(dt.into());
+    }
+    let time = if end_of_day { "23:59:59" } else { "00:00:00" };
+    DateTime::parse_from_rfc3339(&format!("{input}T{time}-04:00"))
+        .map(Into::into)
+        .map_err(|e| {
+            poem::Error::from_string(
+                format!("invalid date/time {input:?}: {e}; expected YYYY-MM-DD or RFC 3339"),
+                StatusCode::BAD_REQUEST,
+            )
+        })
+}
+
 #[handler]
 fn day_handler(
     Path((day, folder)): Path<(String, String)>,
@@ -487,22 +508,16 @@ fn day_handler(
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
-    // Assume the day is in the format YYYY-MM-DD and the timezone is Eastern
-    // TODO: what do we do for DST?
-    let start = format!("{}T00:00:00-04:00", day);
-    let end = format!("{}T23:59:59-04:00", day);
-    let start = DateTime::parse_from_rfc3339(&start).unwrap();
-    let end = DateTime::parse_from_rfc3339(&end).unwrap();
+    let start = parse_bound(&day, false)?;
+    let end = parse_bound(&day, true)?;
 
-    frame_collection
-        .get_range(start.into(), end.into())
-        .into_response(
-            params.fps.unwrap_or(20),
-            params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
-            params.format.as_deref(),
-            &mut cache.lock().unwrap(),
-            headers,
-        )
+    frame_collection.get_range(start, end).into_response(
+        params.fps.unwrap_or(20),
+        params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+        params.format.as_deref(),
+        &mut cache.lock().unwrap(),
+        headers,
+    )
 }
 
 #[handler]
@@ -516,18 +531,16 @@ fn exact_handler(
     let resolved_folder = PathBuf::from(frame_folder).join(folder);
     let frame_collection = FrameCollection::new(resolved_folder);
 
-    let start = DateTime::parse_from_rfc3339(&start).unwrap();
-    let end = DateTime::parse_from_rfc3339(&end).unwrap();
+    let start = parse_bound(&start, false)?;
+    let end = parse_bound(&end, true)?;
 
-    frame_collection
-        .get_range(start.into(), end.into())
-        .into_response(
-            params.fps.unwrap_or(20),
-            params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
-            params.format.as_deref(),
-            &mut cache.lock().unwrap(),
-            headers,
-        )
+    frame_collection.get_range(start, end).into_response(
+        params.fps.unwrap_or(20),
+        params.ffmpeg_args.as_ref().map(|x| x.clone().into()),
+        params.format.as_deref(),
+        &mut cache.lock().unwrap(),
+        headers,
+    )
 }
 
 #[handler]
